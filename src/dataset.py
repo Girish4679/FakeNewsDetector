@@ -1,66 +1,54 @@
 """
 PyTorch Dataset for Fakeddit multimodal classification.
 
-Each sample returns:
-    input_ids       : (seq_len,)  tokenized text
-    attention_mask  : (seq_len,)
-    image           : (3, H, W)   normalized image tensor
-    label           : int         2-way label (0 = real, 1 = fake)
+Uses CLIP's processor to handle both text tokenization and image preprocessing,
+so both modalities are in exactly the format CLIP expects.
 
-Rows whose image file is not present on disk are silently skipped so the
-dataset works regardless of how many images have been downloaded so far.
+Each sample returns:
+    input_ids       : (77,)        CLIP-tokenized text (max 77 tokens)
+    attention_mask  : (77,)
+    pixel_values    : (3, 224, 224) CLIP-normalized image tensor
+    label           : int           2-way label (0 = real, 1 = fake)
+
+Rows whose image file is not present on disk are silently skipped.
 """
 
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import torch
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset
-from torchvision import transforms
-from transformers import AutoTokenizer
+from transformers import CLIPProcessor
 
 
-# Default image transform matches ViT-B/16 and ResNet-50 expectations
-DEFAULT_IMAGE_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+BLANK_IMAGE = Image.new("RGB", (224, 224), color=0)  # fallback for missing images
 
 
 class FakedditDataset(Dataset):
     """
     Args:
-        tsv_path:         Path to a Fakeddit split TSV (train/validate/test).
-        image_dir:        Directory containing downloaded images named <id>.jpg
-        tokenizer_name:   HuggingFace tokenizer identifier (default: roberta-base)
-        max_length:       Max token sequence length for the tokenizer
-        label_col:        Which label column to use: "2_way_label", "3_way_label", or "6_way_label"
-        image_transform:  torchvision transform applied to each image
-        require_image:    If True, skip rows without a downloaded image.
-                          If False, return a blank image tensor for missing images.
+        tsv_path:       Path to a Fakeddit split TSV (train/validate/test).
+        image_dir:      Directory containing downloaded images named <id>.jpg
+        clip_model_name HuggingFace CLIP model name — must match the model in model.py.
+        label_col:      Which label column to use: "2_way_label", "3_way_label", or "6_way_label"
+        require_image:  If True (default), skip rows without a downloaded image.
+                        If False, substitute a blank image for missing files.
     """
 
     def __init__(
         self,
         tsv_path: str,
         image_dir: str,
-        tokenizer_name: str = "roberta-base",
-        max_length: int = 128,
+        clip_model_name: str = "openai/clip-vit-base-patch16",
         label_col: str = "2_way_label",
-        image_transform: Optional[transforms.Compose] = None,
         require_image: bool = True,
     ):
         self.image_dir = Path(image_dir)
-        self.max_length = max_length
         self.label_col = label_col
-        self.image_transform = image_transform or DEFAULT_IMAGE_TRANSFORM
-        self.require_image = require_image
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        # CLIPProcessor handles both tokenization AND image preprocessing in one call
+        self.processor = CLIPProcessor.from_pretrained(clip_model_name)
 
         df = pd.read_csv(tsv_path, sep="\t")
         df = df.fillna("")
@@ -71,46 +59,40 @@ class FakedditDataset(Dataset):
             available = {p.stem for p in self.image_dir.glob("*.jpg")}
             df = df[df["id"].astype(str).isin(available)]
 
-        df = df.reset_index(drop=True)
-        self.df = df
-
-        print(f"FakedditDataset loaded {len(self.df):,} samples from {tsv_path}")
+        self.df = df.reset_index(drop=True)
+        print(f"FakedditDataset: {len(self.df):,} samples  ({tsv_path})")
 
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> dict:
-        row = self.df.iloc[idx]
-        text = str(row["clean_title"])
-        label = int(row[self.label_col])
+        row    = self.df.iloc[idx]
+        text   = str(row["clean_title"])
+        label  = int(row[self.label_col])
         img_id = str(row["id"])
 
-        # Tokenize text
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
+        image = self._load_image(self.image_dir / f"{img_id}.jpg")
+
+        # CLIPProcessor tokenizes text (max 77 tokens) and normalizes the image
+        encoded = self.processor(
+            text=text,
+            images=image,
+            return_tensors="pt",
             padding="max_length",
             truncation=True,
-            return_tensors="pt",
         )
 
-        # Load image
-        img_path = self.image_dir / f"{img_id}.jpg"
-        image = self._load_image(img_path)
-
         return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "image": image,
-            "label": torch.tensor(label, dtype=torch.long),
+            "input_ids":      encoded["input_ids"].squeeze(0),       # (77,)
+            "attention_mask": encoded["attention_mask"].squeeze(0),  # (77,)
+            "pixel_values":   encoded["pixel_values"].squeeze(0),    # (3, 224, 224)
+            "label":          torch.tensor(label, dtype=torch.long),
         }
 
-    def _load_image(self, path: Path) -> torch.Tensor:
+    def _load_image(self, path: Path) -> Image.Image:
         if path.exists():
             try:
-                img = Image.open(path).convert("RGB")
-                return self.image_transform(img)
+                return Image.open(path).convert("RGB")
             except (UnidentifiedImageError, OSError):
                 pass
-        # Return blank image if file is missing or corrupt
-        return torch.zeros(3, 224, 224)
+        return BLANK_IMAGE

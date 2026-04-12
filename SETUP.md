@@ -155,6 +155,80 @@ Wait for Google Drive to finish syncing before starting training.
 
 ---
 
+## Training (Windows GPU machine)
+
+### 6. Quick smoke test — no images needed
+
+Before training on real data, verify the whole pipeline runs end to end:
+
+```bash
+python scripts/make_subset.py --n 500
+python src/train.py \
+  --data_dir data \
+  --image_dir images \
+  --checkpoint_dir checkpoints \
+  --subset \
+  --epochs 2 \
+  --batch_size 8
+```
+
+This runs 2 epochs on 500 samples with blank images for missing files. If it completes without errors, the pipeline is working.
+
+---
+
+### 7. Full training — frozen CLIP (recommended starting point)
+
+Only the fusion MLP is trained (~200K params). Fast, low VRAM, strong baseline.
+
+```bash
+python src/train.py \
+  --data_dir "G:\My Drive\fakeddit\data" \
+  --image_dir "G:\My Drive\fakeddit\images" \
+  --checkpoint_dir "G:\My Drive\fakeddit\checkpoints" \
+  --epochs 10 \
+  --batch_size 32
+```
+
+If you get a **CUDA out of memory** error, halve the batch size:
+```bash
+  --batch_size 16 --accum_steps 2
+```
+`accum_steps 2` means gradients accumulate over 2 batches before a weight update, keeping the effective batch size at 32.
+
+---
+
+### 8. Fine-tuning CLIP layers (after baseline is working)
+
+Unfreezes the last 3 layers of both CLIP encoders for additional task-specific adaptation.
+Uses a lower LR for CLIP layers to avoid destroying pretrained weights.
+
+```bash
+python src/train.py \
+  --data_dir "G:\My Drive\fakeddit\data" \
+  --image_dir "G:\My Drive\fakeddit\images" \
+  --checkpoint_dir "G:\My Drive\fakeddit\checkpoints" \
+  --unfreeze_clip \
+  --lr_head 1e-4 \
+  --lr_clip 1e-6 \
+  --epochs 5 \
+  --batch_size 16
+```
+
+---
+
+### 9. Evaluate on the test set
+
+```bash
+python src/evaluate.py \
+  --checkpoint "G:\My Drive\fakeddit\checkpoints\checkpoint_best.pt" \
+  --data_dir "G:\My Drive\fakeddit\data" \
+  --image_dir "G:\My Drive\fakeddit\images"
+```
+
+Prints F1, AUC-ROC, accuracy, and a full confusion matrix.
+
+---
+
 ## For other team members (no GPU, no images)
 
 Generate a small local subset for development — no images needed:
@@ -164,3 +238,8 @@ python scripts/make_subset.py --n 5000
 ```
 
 This writes `data/subset_train.tsv`, `data/subset_validate.tsv`, `data/subset_test.tsv` with 5,000 balanced samples. Enough to write and test model code locally.
+
+To verify the model code runs without a GPU:
+```bash
+python src/model.py
+```
