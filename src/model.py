@@ -104,14 +104,13 @@ class CLIPEncoder(nn.Module):
                 param.requires_grad = True
 
     def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        features = self.clip.get_text_features(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        out = self.clip.text_model(input_ids=input_ids, attention_mask=attention_mask)
+        features = self.clip.text_projection(out.pooler_output)
         return F.normalize(features, dim=-1)   # (B, 512)
 
     def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        features = self.clip.get_image_features(pixel_values=pixel_values)
+        out = self.clip.vision_model(pixel_values=pixel_values)
+        features = self.clip.visual_projection(out.pooler_output)
         return F.normalize(features, dim=-1)   # (B, 512)
 
 

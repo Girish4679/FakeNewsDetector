@@ -62,7 +62,7 @@ def main():
     print(f"Device: {device}\n")
 
     # ----- Load checkpoint -----
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     print(f"Checkpoint from epoch {ckpt['epoch']}")
     if ckpt.get("metrics"):
         m = ckpt["metrics"]
@@ -70,7 +70,8 @@ def main():
 
     # ----- Rebuild model -----
     model = FakeNewsDetector(clip_model_name=args.clip_model)
-    model.load_state_dict(ckpt["model"])
+    state_dict = {k: v for k, v in ckpt["model"].items() if not k.startswith("loss_fn")}
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
 
